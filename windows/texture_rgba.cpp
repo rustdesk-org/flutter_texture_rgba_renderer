@@ -1,5 +1,16 @@
 #include "texture_rgba.h"
 #include <iostream>
+#include <shared_mutex>
+#include <unordered_set>
+
+namespace
+{
+	// Membership is checked under a shared lock on every push, so removal
+	// (unique lock, in ~TextureRgba) drains in-flight pushes before the
+	// object's memory goes away.
+	std::shared_mutex g_live_mutex;
+	std::unordered_set<void *> g_live_textures;
+}
 
 TextureRgba::TextureRgba(flutter::TextureRegistrar *texture_registrar)
 {
@@ -9,11 +20,18 @@ TextureRgba::TextureRgba(flutter::TextureRegistrar *texture_registrar)
 											  { return this->buffer(); });
 	texture_ = std::make_unique<flutter::TextureVariant>(buffer);
 	this->texture_id_ = texture_registrar->RegisterTexture(texture_.get());
+	{
+		std::unique_lock<std::shared_mutex> lock(g_live_mutex);
+		g_live_textures.insert(this);
+	}
 }
 
 TextureRgba::~TextureRgba()
 {
-	texture_registrar_->UnregisterTexture(texture_id_);
+	// Unregistration happens in closeTexture; here only make sure no push is
+	// still running on this object and no later push can reach it.
+	std::unique_lock<std::shared_mutex> lock(g_live_mutex);
+	g_live_textures.erase(this);
 }
 
 void TextureRgba::MarkVideoFrameAvailable(
@@ -68,6 +86,28 @@ inline const FlutterDesktopPixelBuffer *TextureRgba::buffer()
 		flutter_pixel_buffer_.width = width_[fg_index_];
 		flutter_pixel_buffer_.height = height_[fg_index_];
 		buff_ready_ = false;
+		consumed_.fetch_add(1, std::memory_order_relaxed);
 	}
 	return &this->flutter_pixel_buffer_;
+}
+
+bool TextureRgbaPush(void *texture_rgba, const uint8_t *buffer, int len, int width, int height)
+{
+	std::shared_lock<std::shared_mutex> lock(g_live_mutex);
+	if (g_live_textures.find(texture_rgba) == g_live_textures.end())
+	{
+		return false;
+	}
+	static_cast<TextureRgba *>(texture_rgba)->MarkVideoFrameAvailable2(buffer, len, width, height);
+	return true;
+}
+
+uint64_t TextureRgbaConsumed(void *texture_rgba)
+{
+	std::shared_lock<std::shared_mutex> lock(g_live_mutex);
+	if (g_live_textures.find(texture_rgba) == g_live_textures.end())
+	{
+		return 0;
+	}
+	return static_cast<TextureRgba *>(texture_rgba)->consumed();
 }

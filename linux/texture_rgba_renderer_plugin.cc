@@ -10,9 +10,19 @@
                               TextureRgbaRendererPlugin))
 
 #include <cstring>
+#include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 std::unordered_map<int64_t, TextureRgba *> g_renderer_map;
+
+// Rust's video thread pushes frames through a raw TextureRgba pointer with no
+// lifetime contract; membership is checked under a shared lock on every push
+// so closeTexture (unique lock) can safely release the object.
+// shared_timed_mutex: this target builds as C++14.
+static std::shared_timed_mutex g_live_mutex;
+static std::unordered_set<void *> g_live_textures;
 
 void FlutterRgbaRendererPluginOnRgba(void *texture_rgba_ptr, const uint8_t *buffer, int len, int width, int height);
 struct _TextureRgbaRendererPlugin
@@ -46,6 +56,10 @@ static void texture_rgba_renderer_plugin_handle_method_call(
       auto texture_id = reinterpret_cast<int64_t>(FL_TEXTURE(texture_rgba));
       texture_rgba->texture_id = texture_id;
       g_renderer_map.insert(std::make_pair(key, texture_rgba));
+      {
+        const std::unique_lock<std::shared_timed_mutex> lock(g_live_mutex);
+        g_live_textures.insert(texture_rgba);
+      }
       // Register to the registrar.
       fl_texture_registrar_register_texture(self->texture_registrar, FL_TEXTURE(texture_rgba));
       response = FL_METHOD_RESPONSE(fl_method_success_response_new(fl_value_new_int(texture_id)));
@@ -57,8 +71,24 @@ static void texture_rgba_renderer_plugin_handle_method_call(
     int64_t key = fl_value_get_int(fl_value_lookup_string(args, "key"));
     if (g_renderer_map.find(key) != g_renderer_map.end())
     {
-      fl_texture_registrar_unregister_texture(self->texture_registrar, FL_TEXTURE(g_renderer_map[key]));
-      texture_rgba_terminate(g_renderer_map[key]);
+      TextureRgba *texture_rgba = g_renderer_map[key];
+      {
+        // Drain Rust-side pushes before tearing the texture down.
+        const std::unique_lock<std::shared_timed_mutex> lock(g_live_mutex);
+        g_live_textures.erase(texture_rgba);
+      }
+      texture_rgba_terminate(texture_rgba);
+      fl_texture_registrar_unregister_texture(self->texture_registrar, FL_TEXTURE(texture_rgba));
+      // The raster thread may still borrow the FlTexture for the frame in
+      // flight (the registrar hands out unowned pointers) and the embedder
+      // offers no completion barrier, so this stays a heuristic: the object
+      // used to be leaked forever to dodge that; release it after a grace
+      // long enough that only a terminally hung raster thread (a dead session
+      // anyway) could still be inside populate.
+      g_timeout_add_seconds(10, [](gpointer data) -> gboolean {
+        g_object_unref(data);
+        return G_SOURCE_REMOVE;
+      }, texture_rgba);
       g_renderer_map.erase(key);
     }
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(fl_value_new_bool(true)));
@@ -72,10 +102,18 @@ static void texture_rgba_renderer_plugin_handle_method_call(
     auto width = fl_value_get_int(fl_value_lookup_string(args, "width"));
     auto height = fl_value_get_int(fl_value_lookup_string(args, "height"));
     auto stride_align = fl_value_get_int(fl_value_lookup_string(args, "stride_align"));
-    auto texture_rgba = g_renderer_map[key];
-    FlutterRgbaRendererPluginOnRgba((void*)texture_rgba, data, data_length, width, height, stride_align);
-    response = FL_METHOD_RESPONSE(fl_method_success_response_new(
-        fl_value_new_bool(fl_texture_registrar_mark_texture_frame_available(self->texture_registrar, FL_TEXTURE(texture_rgba)))));
+    auto it = g_renderer_map.find(key);
+    if (it == g_renderer_map.end())
+    {
+      response = FL_METHOD_RESPONSE(fl_method_success_response_new(fl_value_new_bool(false)));
+    }
+    else
+    {
+      auto texture_rgba = it->second;
+      FlutterRgbaRendererPluginOnRgba((void*)texture_rgba, data, data_length, width, height, stride_align);
+      response = FL_METHOD_RESPONSE(fl_method_success_response_new(
+          fl_value_new_bool(fl_texture_registrar_mark_texture_frame_available(self->texture_registrar, FL_TEXTURE(texture_rgba)))));
+    }
   }
   else if (strcmp(method, "getTexturePtr") == 0)
   {
@@ -147,13 +185,20 @@ extern "C" {
         g_warning("The width, height is not valid, ignoring this request.");
         return;
       }
+      // The pointer may already have been closed by the Dart side; holding
+      // the shared lock across the push keeps close from freeing it mid-call
+      // without serializing pushes of different displays against each other.
+      const std::shared_lock<std::shared_timed_mutex> live_lock(g_live_mutex);
+      if (g_live_textures.find(texture_rgba_ptr) == g_live_textures.end()) {
+        return;
+      }
       TextureRgba* self = TEXTURE_RGBA(texture_rgba_ptr);
       g_mutex_lock(&self->mutex);
       // selfate has registered a texture_id,
       if (self->texture_id != 0 && !g_atomic_int_get(&self->buffer_ready) && !texture_rgba_is_terminate(self)) {
         // copy data to the texture.
         auto copied_data = new uint8_t[len];
-        memcpy(copied_data, buffer, len); 
+        memcpy(copied_data, buffer, len);
         // It's safe to working on a non reading index
         g_atomic_pointer_set(&self->buffer, copied_data);
         g_atomic_int_set(&self->video_height, height);
@@ -165,5 +210,17 @@ extern "C" {
         );
       }
       g_mutex_unlock(&self->mutex);
+   }
+
+   uint64_t FlutterRgbaRendererPluginGetConsumed(void *texture_rgba_ptr) {
+      const std::shared_lock<std::shared_timed_mutex> live_lock(g_live_mutex);
+      if (g_live_textures.find(texture_rgba_ptr) == g_live_textures.end()) {
+        return 0;
+      }
+      TextureRgba* self = TEXTURE_RGBA(texture_rgba_ptr);
+      g_mutex_lock(&self->mutex);
+      uint64_t consumed = self->consumed;
+      g_mutex_unlock(&self->mutex);
+      return consumed;
    }
 };

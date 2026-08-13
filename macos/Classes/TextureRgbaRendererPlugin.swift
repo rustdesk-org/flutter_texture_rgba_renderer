@@ -28,16 +28,26 @@ public class TextureRgbaRendererPlugin: NSObject, FlutterPlugin {
             result(-1)
         } else {
             let textRgba = TextRgba.new(registry: texture_registry)
-            renderer[key] = textRgba
-            result(textRgba.textureId)
+            if (textRgba.textureId == -1) {
+                // Dart treats -1 as failure and never closes it; do not store.
+                result(-1)
+            } else {
+                renderer[key] = textRgba
+                result(textRgba.textureId)
+            }
         }
     case "closeTexture":
         let args = call.arguments as! Dictionary<String, Any?>
         let key = args["key"] as! Int64
-        if (renderer[key] != nil) {
-            if (-1 != renderer[key]?.textureId) {
-                texture_registry?.unregisterTexture(renderer[key]?.textureId ?? -1)
+        if let textRgba = renderer[key] {
+            // Stop Rust-side pushes first, then release; keeping closed
+            // textures in `renderer` leaked them and made a reused key
+            // return -1 forever.
+            TextureRgbaRegistry.remove(textRgba)
+            if (-1 != textRgba.textureId) {
+                texture_registry?.unregisterTexture(textRgba.textureId)
             }
+            renderer.removeValue(forKey: key)
             result(true)
         } else {
             result(false)

@@ -16,14 +16,23 @@ void TextureRgbaRendererPluginCApiRegisterWithRegistrar(
 
 void FlutterRgbaRendererPluginOnRgba(void *texture_rgba, const uint8_t *buffer, int len, int width, int height, int stride_align)
 {
-    assert(texture_rgba != nullptr);
     assert(buffer != nullptr);
     assert(width > 0 && height > 0);
     if (texture_rgba == nullptr || buffer == nullptr || width <= 0 || height <= 0)
     {
         return;
     }
-    
-    TextureRgba *rgba = static_cast<TextureRgba *>(texture_rgba);
-    rgba->MarkVideoFrameAvailable2(buffer, len, width, height);
+
+    // The pointer may already have been closed by the Dart side; the push
+    // validates it against the live-object set instead of dereferencing.
+    TextureRgbaPush(texture_rgba, buffer, len, width, height);
+}
+
+uint64_t FlutterRgbaRendererPluginGetConsumed(void *texture_rgba)
+{
+    if (texture_rgba == nullptr)
+    {
+        return 0;
+    }
+    return TextureRgbaConsumed(texture_rgba);
 }
