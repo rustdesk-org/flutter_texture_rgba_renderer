@@ -24,6 +24,7 @@ struct _TextureRgba
   gboolean terminated = FALSE;
   gint32 video_width = 0;
   gint32 video_height = 0;
+  guint64 consumed = 0;
   GMutex mutex;
 };
 
@@ -43,6 +44,8 @@ G_DEFINE_TYPE(TextureRgba, texture_rgba,
 static void texture_rgba_terminate(TextureRgba* self) {
   g_mutex_lock(&self->mutex);
   g_atomic_int_set(&self->terminated, TRUE);
+  // Free nothing here: the raster thread reads the handed-out buffer AFTER
+  // copy_pixels returns (mutex released); finalize frees after the grace.
   g_mutex_unlock(&self->mutex);
 }
 
@@ -80,7 +83,11 @@ static gboolean texture_rgba_copy_pixels(FlPixelBufferTexture* texture,
     *width = g_atomic_int_get(&self->video_width);
     *height = g_atomic_int_get(&self->video_height);
     self->prior_buffer = (uint8_t *)buffer;
+    // Ownership moved to prior_buffer; leaving both set would alias and
+    // double-free in finalize.
+    g_atomic_pointer_set(&self->buffer, nullptr);
     g_atomic_int_set(&self->buffer_ready, FALSE);
+    self->consumed++;
     g_mutex_unlock(&self->mutex);
     return TRUE;
   } else if (g_atomic_int_get(&self->terminated)) {
@@ -137,9 +144,25 @@ static TextureRgba *texture_rgba_new(FlTextureRegistrar* registrar)
   return texture;
 }
 
+static void texture_rgba_finalize(GObject *object)
+{
+  TextureRgba *self = TEXTURE_RGBA(object);
+  if (self->prior_buffer) {
+    delete[] self->prior_buffer;
+    self->prior_buffer = nullptr;
+  }
+  if (self->buffer) {
+    delete[] self->buffer;
+    self->buffer = nullptr;
+  }
+  g_mutex_clear(&self->mutex);
+  G_OBJECT_CLASS(texture_rgba_parent_class)->finalize(object);
+}
+
 static void texture_rgba_class_init(TextureRgbaClass *klass)
 {
   FL_PIXEL_BUFFER_TEXTURE_CLASS(klass)->copy_pixels = texture_rgba_copy_pixels;
+  G_OBJECT_CLASS(klass)->finalize = texture_rgba_finalize;
 }
 
 static void texture_rgba_init(TextureRgba* self) {
