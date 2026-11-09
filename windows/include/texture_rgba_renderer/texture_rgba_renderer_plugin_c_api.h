@@ -2,6 +2,7 @@
 #define FLUTTER_PLUGIN_TEXTURE_RGBA_RENDERER_PLUGIN_C_API_H_
 
 #include <flutter_plugin_registrar.h>
+#include <stdint.h>
 
 #ifdef FLUTTER_PLUGIN_IMPL
 #define FLUTTER_PLUGIN_EXPORT __declspec(dllexport)
@@ -17,6 +18,11 @@ FLUTTER_PLUGIN_EXPORT void TextureRgbaRendererPluginCApiRegisterWithRegistrar(
     FlutterDesktopPluginRegistrarRef registrar);
 
 FLUTTER_PLUGIN_EXPORT void FlutterRgbaRendererPluginOnRgba(void* texture_rgba, const uint8_t* buffer, int len, int width, int height, int stride_align);
+
+// Number of frames the Flutter engine has actually consumed from this
+// texture. 0 if the texture is unknown/closed. Lets the pushing side detect
+// a texture that renders nothing and fall back to software rendering.
+FLUTTER_PLUGIN_EXPORT uint64_t FlutterRgbaRendererPluginGetConsumed(void* texture_rgba);
 
 #if defined(__cplusplus)
 }  // extern "C"

@@ -2,6 +2,7 @@
 #define TEXTURE_RGBA_H_
 
 #include <flutter/texture_registrar.h>
+#include <atomic>
 #include <mutex>
 #include <chrono>
 
@@ -17,6 +18,8 @@ public:
 
 	int64_t texture_id() const { return texture_id_; };
 
+	uint64_t consumed() const { return consumed_.load(std::memory_order_relaxed); }
+
 	const FlutterDesktopPixelBuffer* buffer();
 
 private:
@@ -27,9 +30,16 @@ private:
 	std::mutex mutex_;
 	int fg_index_ = 0;
 	bool buff_ready_ = false;
+	std::atomic<uint64_t> consumed_ = 0;
 	size_t width_[2];
 	size_t height_[2];
 	std::vector<uint8_t> buffer_tmp_[2];
 };
+
+// Rust's video thread pushes frames through a raw TextureRgba pointer with no
+// lifetime contract; these validate the pointer against the set of live
+// objects so a concurrent close cannot free memory out from under a push.
+bool TextureRgbaPush(void* texture_rgba, const uint8_t* buffer, int len, int width, int height);
+uint64_t TextureRgbaConsumed(void* texture_rgba);
 
 #endif  // TEXTURE_RGBA_H_

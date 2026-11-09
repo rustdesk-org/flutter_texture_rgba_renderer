@@ -52,16 +52,25 @@ void TextureRgbaRendererPlugin::HandleMethodCall(
          it->second = std::make_unique<TextureRgba>(this->texture_registrar);
          result->Success(flutter::EncodableValue(it->second->texture_id()));
      }
+     else {
+         // A missing response leaves the Dart future pending forever.
+         result->Success(flutter::EncodableValue(int64_t(-1)));
+     }
   }
   else if (method_call.method_name().compare("closeTexture") == 0) {
       auto args = std::get<flutter::EncodableMap>(*method_call.arguments());
       auto key = std::get<int>(args.at(flutter::EncodableValue("key")));
-      if (textures_.find(key) == textures_.end()) {
+      auto it = textures_.find(key);
+      if (it == textures_.end()) {
           result->Success(flutter::EncodableValue(false));
       }
       else {
-          this->texture_registrar->UnregisterTexture(textures_[key]->texture_id());
-          textures_.erase(key);
+          // UnregisterTexture only posts the engine-side removal to the
+          // raster thread; deleting here would race an in-flight
+          // PopulateTexture. Keep the object alive until the engine is done.
+          std::shared_ptr<TextureRgba> texture = std::move(it->second);
+          textures_.erase(it);
+          this->texture_registrar->UnregisterTexture(texture->texture_id(), [texture] {});
           result->Success(flutter::EncodableValue(true));
       }
   }

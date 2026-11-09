@@ -24,6 +24,11 @@ FLUTTER_PLUGIN_EXPORT void texture_rgba_renderer_plugin_register_with_registrar(
 // Keep the same symbol name with Windows.
 FLUTTER_PLUGIN_EXPORT void FlutterRgbaRendererPluginOnRgba(void *texture_rgba, const uint8_t *buffer, int len, int width, int height, int stride_align);
 
+// Frames the engine actually consumed from this texture; 0 if unknown/closed.
+// The target builds with hidden visibility, so without this exported
+// declaration the symbol is invisible to dlsym and the watchdog stays off.
+FLUTTER_PLUGIN_EXPORT uint64_t FlutterRgbaRendererPluginGetConsumed(void *texture_rgba);
+
 G_END_DECLS
 
 #endif  // FLUTTER_PLUGIN_TEXTURE_RGBA_RENDERER_PLUGIN_H_
